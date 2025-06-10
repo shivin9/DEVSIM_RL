@@ -56,7 +56,7 @@ CONTACT_ANODE = "Anode"; CONTACT_CATHODE = "Cathode"
 class DiodeDesignEnv(gym.Env):
     metadata = {'render_modes': []}
 
-    def __init__(self, max_steps=NUM_CHECKLIST_ITEMS + 3, target_metrics=None, execute_on_finalize=True):
+    def __init__(self, max_steps=NUM_CHECKLIST_ITEMS + 1000, target_metrics=None, execute_on_finalize=True):
         super().__init__()
         self._max_steps = max_steps
         self.target_metrics = target_metrics or {"if_min": 1e-4, "ir_max": 1e-9}
@@ -102,21 +102,21 @@ class DiodeDesignEnv(gym.Env):
         super().reset(seed=seed)
         # No need to reinit devsim here if script is executed externally
         # However, if self.execute_on_finalize is True, we DO need it.
-        if self.execute_on_finalize and devsim:
-             try:
-                 devsim.reinit()
-                 logger.info("DEVSIM reinitialized for internal execution.")
-             except Exception as e:
-                 logger.error(f"devsim.reinit() failed: {e}")
-        elif not devsim and self.execute_on_finalize:
-             logger.error("execute_on_finalize=True but devsim module failed to import.")
+        # if self.execute_on_finalize and devsim:
+        #      try:
+        #          devsim.reinit()
+        #          logger.info("DEVSIM reinitialized for internal execution.")
+        #      except Exception as e:
+        #          logger.error(f"devsim.reinit() failed: {e}")
+        # elif not devsim and self.execute_on_finalize:
+        #      logger.error("execute_on_finalize=True but devsim module failed to import.")
 
-        self._completed_steps = set()
-        self._design_params = {}
-        self._generated_script_lines = [] # Reset script buffer
-        self._current_step = 0
-        self._geometry_params = {'device_length_cm': DEVICE_LENGTH_UM * UM_TO_CM, 'junction_pos_cm': JUNCTION_POS_UM * UM_TO_CM}
-        logger.info("DiodeDesignEnv reset (Script Generation Mode).")
+        # self._completed_steps = set()
+        # self._design_params = {}
+        # self._generated_script_lines = [] # Reset script buffer
+        # self._current_step = 0
+        # self._geometry_params = {'device_length_cm': DEVICE_LENGTH_UM * UM_TO_CM, 'junction_pos_cm': JUNCTION_POS_UM * UM_TO_CM}
+        # logger.info("DiodeDesignEnv reset (Script Generation Mode).")
         observation = self._get_observation()
         info = {"completed_steps": sorted(list(self._completed_steps)), "params": self._design_params, "script": ""}
         return observation, info
@@ -333,53 +333,78 @@ class DiodeDesignEnv(gym.Env):
             return -200.0 # Major penalty for script execution error
 
 
+# In devsim_environment.py
+
     def step(self, action):
         self._current_step += 1
         action_item_index = int(action)
         if not (0 <= action_item_index < len(DIODE_CHECKLIST)):
             logger.error(f"Invalid action index received: {action_item_index}")
             observation = self._get_observation()
-            return observation, -1.0, True, False, {"error": "Invalid action index"}
+            # Severe penalty for out-of-bounds action
+            return observation, -50.0, True, False, {"error": "Invalid action index"}
+
         action_item_name = DIODE_CHECKLIST[action_item_index]
-        terminated = False; truncated = False; reward = -0.01 # Step cost
+        terminated = False
+        truncated = False
         info = {"action_name": action_item_name}
         logger.info(f"--- Step {self._current_step}: Agent selected action '{action_item_name}' ({action_item_index}) ---")
 
+        # --- REWARD SHAPING LOGIC ---
+        required_deps = {
+            "DEFINE_GEOMETRY": {"INIT_MESH"}, "DEFINE_REGIONS": {"DEFINE_GEOMETRY"},
+            "DEFINE_CONTACTS": {"DEFINE_REGIONS"}, "FINALIZE_MESH": {"DEFINE_CONTACTS", "DEFINE_REGIONS"},
+            "CREATE_DEVICE": {"FINALIZE_MESH"}, "SET_MATERIAL_PARAMS": {"CREATE_DEVICE"},
+            "DEFINE_P_DOPING": {"CREATE_DEVICE", "DEFINE_REGIONS"},
+            "DEFINE_N_DOPING": {"CREATE_DEVICE", "DEFINE_REGIONS"},
+            "DEFINE_NET_DOPING": {"DEFINE_P_DOPING", "DEFINE_N_DOPING"},
+            "DEFINE_VARIABLES": {"CREATE_DEVICE"},
+            "SETUP_PHYSICS": {"CREATE_DEVICE", "SET_MATERIAL_PARAMS"},
+            "SETUP_EQUATIONS": {"DEFINE_VARIABLES", "SETUP_PHYSICS", "DEFINE_NET_DOPING"},
+            "SETUP_CONTACT_BC": {"CREATE_DEVICE", "DEFINE_CONTACTS", "SETUP_EQUATIONS"}
+        }
+
         if action_item_name in self._completed_steps:
             logger.warning(f"Action '{action_item_name}' already completed. Applying penalty.")
-            reward = -1.0
+            reward = -2.0 # Increased penalty for repeating a step
             info["error"] = "Step already completed"
+
         elif action_item_name == "FINALIZE_SETUP_RUN_TEST":
             required_prereqs = {"DEFINE_P_DOPING", "DEFINE_N_DOPING", "SETUP_CONTACT_BC", "SETUP_EQUATIONS"}
             if not required_prereqs.issubset(self._completed_steps):
                  logger.error(f"Cannot finalize: Prerequisites {required_prereqs} not met. Completed: {self._completed_steps}")
-                 reward = -20.0; terminated = True
+                 reward = -20.0
+                 terminated = True
                  info["error"] = "Prerequisites for finalize not met"
             else:
-                 logger.info("Action 'FINALIZE_SETUP_RUN_TEST' selected.")
-                 # Mark step as completed before execution attempt
+                 logger.info("Action 'FINALIZE_SETUP_RUN_TEST' selected. Calculating final reward.")
                  self._completed_steps.add(action_item_name)
-                 # Execute script and get final reward (if enabled)
+                 # This calls the placeholder simulation for now.
+                 # The final reward from this function is a large positive or negative value.
                  reward = self._execute_generated_script_and_get_reward()
-                 terminated = True # Always terminate on finalize attempt
-                 # Info will be updated by the execution function or reflect failure
-                 info["final_script"] = "\n".join(self._generated_script_lines) # Optionally store final script
+                 terminated = True
+                 info["final_script"] = "\n".join(self._generated_script_lines)
         else:
-            # Generate the code string for this step
-            code_string = self._generate_devsim_step_code(action_item_index)
-            if code_string is not None:
-                self._generated_script_lines.append(code_string) # Add code lines
-                self._completed_steps.add(action_item_name)
-                # Use the intermediate reward (step cost)
-                info["code_generated"] = True
+            # Check if dependencies for the action are met
+            deps = required_deps.get(action_item_name, set())
+            if not deps.issubset(self._completed_steps):
+                # Large penalty for dependency failure
+                reward = -10.0
+                terminated = True
+                info["error"] = f"Dependency failed for '{action_item_name}'. Requires: {deps}, Have: {self._completed_steps}"
             else:
-                # Failed to generate code (e.g., dependency error)
-                reward = -10.0; terminated = True
-                info["error"] = "Step generation failed (dependency error)"
-                info["code_generated"] = False
+                # *** NEW: Positive reward for making correct progress! ***
+                # The reward is higher for more complex steps (more dependencies).
+                reward = 0.5 + (0.5 * len(deps))
+                logger.info(f"Valid step. Assigning progress reward: {reward:.2f}")
+
+                # Generate code and update state
+                code_string = self._generate_devsim_step_code(action_item_index)
+                self._generated_script_lines.append(code_string)
+                self._completed_steps.add(action_item_name)
+                info["code_generated"] = True
 
         observation = self._get_observation()
-        # Update info dict *after* getting observation
         info["completed_steps"] = sorted(list(self._completed_steps))
         info["params"] = self._design_params
 
@@ -389,13 +414,11 @@ class DiodeDesignEnv(gym.Env):
                 reward = -20.0 # Penalize if max steps reached without finalizing
             logger.info("Max steps reached, truncating episode.")
 
-        # Final check on reward value
         if not isinstance(reward, (int, float)):
              logger.error(f"Invalid reward type generated: {reward} ({type(reward)})")
-             reward = -500 # Assign a default error penalty
+             reward = -500
 
-        return observation, float(reward), terminated, truncated, info # Ensure reward is float
-
+        return observation, float(reward), terminated, truncated, info
 
     def close(self):
         pass
