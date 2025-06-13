@@ -23,7 +23,8 @@ def run_final_diode_simulation(design_params):
     # It needs access to the current DEVSIM state after the script executes.
     # For now, it remains a placeholder calculating metrics based on params.
     logger.info(f"Placeholder: Calculating final diode metrics based on params: {design_params}")
-    sim_success = np.random.rand() > 0.1
+    # sim_success = np.random.rand() > 0.1
+    sim_success = True
     if sim_success:
         na = design_params.get('na', 1e17); nd = design_params.get('nd', 1e17)
         vf = 0.6 + 0.1 * np.log10(max(1e15, 1e17 / na)) + 0.1 * np.log10(max(1e15, 1e17 / nd))
@@ -36,18 +37,50 @@ def run_final_diode_simulation(design_params):
         return {}, False
 
 # --- Checklist Definition ---
+# DIODE_CHECKLIST = [
+#     "INIT_MESH", "DEFINE_GEOMETRY", "DEFINE_REGIONS", "DEFINE_CONTACTS",
+#     "FINALIZE_MESH", "CREATE_DEVICE", "SET_MATERIAL_PARAMS",
+#     "DEFINE_P_DOPING", "DEFINE_N_DOPING", "DEFINE_NET_DOPING",
+#     "DEFINE_VARIABLES", "SETUP_PHYSICS", "SETUP_EQUATIONS",
+#     "SETUP_CONTACT_BC", "FINALIZE_SETUP_RUN_TEST" # Triggers execution
+# ]
+
+# In devsim_environment.py
+
+# --- NEW RESTRUCTURED CHECKLIST FOR TWO-STAGE SOLVE ---
 DIODE_CHECKLIST = [
-    "INIT_MESH", "DEFINE_GEOMETRY", "DEFINE_REGIONS", "DEFINE_CONTACTS",
-    "FINALIZE_MESH", "CREATE_DEVICE", "SET_MATERIAL_PARAMS",
-    "DEFINE_P_DOPING", "DEFINE_N_DOPING", "DEFINE_NET_DOPING",
-    "DEFINE_VARIABLES", "SETUP_PHYSICS", "SETUP_EQUATIONS",
-    "SETUP_CONTACT_BC", "FINALIZE_SETUP_RUN_TEST" # Triggers execution
+    "INIT_MESH",
+    "DEFINE_GEOMETRY",
+    "DEFINE_REGIONS",
+    "DEFINE_CONTACTS",
+    "FINALIZE_MESH",
+    "CREATE_DEVICE",
+    "SET_MATERIAL_PARAMS",
+    "DEFINE_P_DOPING",
+    "DEFINE_N_DOPING",
+    "DEFINE_NET_DOPING",
+    "DEFINE_VARIABLES",
+    "SETUP_POTENTIAL_EQUATION",     # New Step
+    "SETUP_CONTACT_BC_POTENTIAL", # Modified Step
+    "SOLVE_POTENTIAL_ONLY",         # New Step
+    "SETUP_CONTINUITY_EQUATIONS", # New Step
+    "SETUP_CONTACT_BC_CARRIERS",  # New Step
+    "FINALIZE_AND_SOLVE_DD"           # Final Full Solve
 ]
+
+NUM_CHECKLIST_ITEMS = len(DIODE_CHECKLIST)
+
+# Also update OBS_DIM to reflect the new checklist length
+PARAM_NA_IDX = NUM_CHECKLIST_ITEMS + 0
+PARAM_ND_IDX = NUM_CHECKLIST_ITEMS + 1
+STEP_COUNT_IDX = NUM_CHECKLIST_ITEMS + 2
+OBS_DIM = NUM_CHECKLIST_ITEMS + 3
+
 NUM_CHECKLIST_ITEMS = len(DIODE_CHECKLIST)
 
 # Indices, Obs Dim, Defaults
-PARAM_NA_IDX = NUM_CHECKLIST_ITEMS + 0; PARAM_ND_IDX = NUM_CHECKLIST_ITEMS + 1
-STEP_COUNT_IDX = NUM_CHECKLIST_ITEMS + 2; OBS_DIM = NUM_CHECKLIST_ITEMS + 3
+# PARAM_NA_IDX = NUM_CHECKLIST_ITEMS + 0; PARAM_ND_IDX = NUM_CHECKLIST_ITEMS + 1
+# STEP_COUNT_IDX = NUM_CHECKLIST_ITEMS + 2; OBS_DIM = NUM_CHECKLIST_ITEMS + 3
 DEFAULT_NA = 1e17; DEFAULT_ND = 1e17
 DEVICE_LENGTH_UM = 1.0; JUNCTION_POS_UM = 0.5; UM_TO_CM = 1e-4
 MESH_NAME = "diode_mesh"; DEVICE_NAME = "MyDiode"; REGION_NAME = "Silicon"
@@ -85,7 +118,6 @@ class DiodeDesignEnv(gym.Env):
         norm_val = (val_log10 - bounds_log10[0]) / (bounds_log10[1] - bounds_log10[0])
         return np.clip(norm_val, 0.0, 1.0)
 
-
     def _get_observation(self):
         # ... (same as before, reads _completed_steps and _design_params) ...
         obs = np.zeros(OBS_DIM, dtype=np.float32)
@@ -100,23 +132,25 @@ class DiodeDesignEnv(gym.Env):
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        # No need to reinit devsim here if script is executed externally
-        # However, if self.execute_on_finalize is True, we DO need it.
-        # if self.execute_on_finalize and devsim:
-        #      try:
-        #          devsim.reinit()
-        #          logger.info("DEVSIM reinitialized for internal execution.")
-        #      except Exception as e:
-        #          logger.error(f"devsim.reinit() failed: {e}")
-        # elif not devsim and self.execute_on_finalize:
-        #      logger.error("execute_on_finalize=True but devsim module failed to import.")
+        
+        # --- FIX ---
+        # We now use the correct function name: reset_devsim()
+        # This will clear all devices, meshes, and models from the previous run.
+        if self.execute_on_finalize and devsim:
+             try:
+                 devsim.reset_devsim()
+                 logger.info("DEVSIM session reset successfully.")
+             except Exception as e:
+                 logger.error(f"devsim.reset_devsim() failed: {e}")
+        # --- END FIX ---
 
-        # self._completed_steps = set()
-        # self._design_params = {}
-        # self._generated_script_lines = [] # Reset script buffer
-        # self._current_step = 0
-        # self._geometry_params = {'device_length_cm': DEVICE_LENGTH_UM * UM_TO_CM, 'junction_pos_cm': JUNCTION_POS_UM * UM_TO_CM}
-        # logger.info("DiodeDesignEnv reset (Script Generation Mode).")
+        self._completed_steps = set()
+        self._design_params = {}
+        self._generated_script_lines = [] # Reset script buffer
+        self._current_step = 0
+        self._geometry_params = {'device_length_cm': DEVICE_LENGTH_UM * UM_TO_CM, 'junction_pos_cm': JUNCTION_POS_UM * UM_TO_CM}
+        # We don't need to log "DiodeDesignEnv reset." anymore as the new log above is more informative.
+        # logger.info("DiodeDesignEnv reset (Script Generation Mode).") 
         observation = self._get_observation()
         info = {"completed_steps": sorted(list(self._completed_steps)), "params": self._design_params, "script": ""}
         return observation, info
@@ -160,15 +194,20 @@ class DiodeDesignEnv(gym.Env):
                 code += f"devsim.add_1d_mesh_line(mesh='{MESH_NAME}', pos=0.0, ps={L*0.05}, tag='{CONTACT_ANODE}')\n"
                 code += f"devsim.add_1d_mesh_line(mesh='{MESH_NAME}', pos={xj}, ps={L*0.001})\n"
                 code += f"devsim.add_1d_mesh_line(mesh='{MESH_NAME}', pos={L}, ps={L*0.05}, tag='{CONTACT_CATHODE}')\n"
+
             elif item_name == "DEFINE_REGIONS":
                 code += f"devsim.add_1d_region(mesh='{MESH_NAME}', region='{REGION_NAME}', material='Silicon', tag1='{CONTACT_ANODE}', tag2='{CONTACT_CATHODE}')\n"
+
             elif item_name == "DEFINE_CONTACTS":
                 code += f"devsim.add_1d_contact(mesh='{MESH_NAME}', name='{CONTACT_ANODE}', tag='{CONTACT_ANODE}', material='metal')\n"
                 code += f"devsim.add_1d_contact(mesh='{MESH_NAME}', name='{CONTACT_CATHODE}', tag='{CONTACT_CATHODE}', material='metal')\n"
+
             elif item_name == "FINALIZE_MESH":
                 code += f"devsim.finalize_mesh(mesh='{MESH_NAME}')\n"
+
             elif item_name == "CREATE_DEVICE":
                 code += f"devsim.create_device(mesh='{MESH_NAME}', device='{DEVICE_NAME}')\n"
+
             elif item_name == "SET_MATERIAL_PARAMS":
                  # Can define constants within the generated script too
                  code += "q = 1.602176634e-19; eps_0 = 8.854187817e-14; k_boltzmann = 8.617333262e-5; T = 300.0\n"
@@ -183,62 +222,104 @@ class DiodeDesignEnv(gym.Env):
                  code += f"devsim.set_parameter(device='{DEVICE_NAME}', region='{REGION_NAME}', name='mu_p', value=200.0)\n"
                  code += f"devsim.set_parameter(device='{DEVICE_NAME}', region='{REGION_NAME}', name='taun', value=1e-7)\n"
                  code += f"devsim.set_parameter(device='{DEVICE_NAME}', region='{REGION_NAME}', name='taup', value=1e-7)\n"
+
             elif item_name == "DEFINE_P_DOPING":
                  na_default = DEFAULT_NA # Use default value for now
                  self._design_params['na'] = na_default # Store the value used
                  xj = self._geometry_params['junction_pos_cm']
                  code += f"devsim.node_model(device='{DEVICE_NAME}', region='{REGION_NAME}', name='Acceptors', equation='{na_default}*step({xj}-x)')\n"
                  logger.info(f" > Generated code to set Na={na_default:.1e}")
+
             elif item_name == "DEFINE_N_DOPING":
                  nd_default = DEFAULT_ND
                  self._design_params['nd'] = nd_default
                  xj = self._geometry_params['junction_pos_cm']
                  code += f"devsim.node_model(device='{DEVICE_NAME}', region='{REGION_NAME}', name='Donors', equation='{nd_default}*step(x-{xj})')\n"
                  logger.info(f" > Generated code to set Nd={nd_default:.1e}")
+
             elif item_name == "DEFINE_NET_DOPING":
                  code += f"devsim.node_model(device='{DEVICE_NAME}', region='{REGION_NAME}', name='NetDoping', equation='Donors - Acceptors')\n"
+
+            # elif item_name == "DEFINE_VARIABLES":
+            #      code += f"devsim.node_solution(device='{DEVICE_NAME}', region='{REGION_NAME}', name='Potential')\n"
+            #      code += f"devsim.node_solution(device='{DEVICE_NAME}', region='{REGION_NAME}', name='Electrons')\n"
+            #      code += f"devsim.node_solution(device='{DEVICE_NAME}', region='{REGION_NAME}', name='Holes')\n"
+
+            #      code += f"devsim.set_node_value(device='{DEVICE_NAME}', region='{REGION_NAME}', name='Potential', value=0.0)\n"
+            #      code += f"devsim.set_node_value(device='{DEVICE_NAME}', region='{REGION_NAME}', name='Electrons', value=0.0)\n"
+            #      code += f"devsim.set_node_value(device='{DEVICE_NAME}', region='{REGION_NAME}', name='Holes', value=0.0)\n"
+
+            #      # Initial guess (important!) - include definition of models needed
+            #      code += f"devsim.node_model(device='{DEVICE_NAME}', region='{REGION_NAME}', name='IntrinsicPotential', equation='Vt * asinh(NetDoping / (2.0 * n_i))')\n"
+            #     #  code += f"devsim.set_node_values(device='{DEVICE_NAME}', region='{REGION_NAME}', name='Potential', init_from='IntrinsicPotential')\n"
+
+            #      # Need to ensure Potential is initialized before these are used if called sequentially
+            #      code += f"devsim.node_model(device='{DEVICE_NAME}', region='{REGION_NAME}', name='IntrinsicElectrons', equation='n_i*exp(Potential/Vt)')\n"
+            #      code += f"devsim.node_model(device='{DEVICE_NAME}', region='{REGION_NAME}', name='IntrinsicHoles', equation='n_i*exp(-Potential/Vt)')\n"
+                #  code += f"devsim.set_node_values(device='{DEVICE_NAME}', region='{REGION_NAME}', name='Electrons', init_from='IntrinsicElectrons')\n"
+                #  code += f"devsim.set_node_values(device='{DEVICE_NAME}', region='{REGION_NAME}', name='Holes', init_from='IntrinsicHoles')\n"
+            
             elif item_name == "DEFINE_VARIABLES":
                  code += f"devsim.node_solution(device='{DEVICE_NAME}', region='{REGION_NAME}', name='Potential')\n"
                  code += f"devsim.node_solution(device='{DEVICE_NAME}', region='{REGION_NAME}', name='Electrons')\n"
                  code += f"devsim.node_solution(device='{DEVICE_NAME}', region='{REGION_NAME}', name='Holes')\n"
-                 # Initial guess (important!) - include definition of models needed
-                 code += f"devsim.node_model(device='{DEVICE_NAME}', region='{REGION_NAME}', name='IntrinsicPotential', equation='Vt * asinh(NetDoping / (2.0 * n_i))')\n"
-                 code += f"devsim.set_node_value(device='{DEVICE_NAME}', region='{REGION_NAME}', name='Potential', init_from='IntrinsicPotential')\n"
-                 # Need to ensure Potential is initialized before these are used if called sequentially
-                 code += f"devsim.node_model(device='{DEVICE_NAME}', region='{REGION_NAME}', name='IntrinsicElectrons', equation='n_i*exp(Potential/Vt)')\n"
-                 code += f"devsim.node_model(device='{DEVICE_NAME}', region='{REGION_NAME}', name='IntrinsicHoles', equation='n_i*exp(-Potential/Vt)')\n"
-                 code += f"devsim.set_node_value(device='{DEVICE_NAME}', region='{REGION_NAME}', name='Electrons', init_from='IntrinsicElectrons')\n"
-                 code += f"devsim.set_node_value(device='{DEVICE_NAME}', region='{REGION_NAME}', name='Holes', init_from='IntrinsicHoles')\n"
+                 
+                 # --- FIX: Use a simple, stable initial guess for the solver ---
+                 # Initialize all solution variables to 0.0 instead of a complex function.
+                 code += f"devsim.set_node_value(device='{DEVICE_NAME}', region='{REGION_NAME}', name='Potential', value=0.0)\n"
+                 code += f"devsim.set_node_value(device='{DEVICE_NAME}', region='{REGION_NAME}', name='Electrons', value=0.0)\n"
+                 code += f"devsim.set_node_value(device='{DEVICE_NAME}', region='{REGION_NAME}', name='Holes', value=0.0)\n"
+
             elif item_name == "SETUP_PHYSICS":
+                 code += f"devsim.edge_from_node_model(device='{DEVICE_NAME}', region='{REGION_NAME}', node_model='Potential')\n"
+                 code += f"devsim.edge_from_node_model(device='{DEVICE_NAME}', region='{REGION_NAME}', node_model='Electrons')\n"
+                 code += f"devsim.edge_from_node_model(device='{DEVICE_NAME}', region='{REGION_NAME}', node_model='Holes')\n"
+
                  code += f"devsim.edge_model(device='{DEVICE_NAME}', region='{REGION_NAME}', name='ElectricField', equation='(Potential@n0 - Potential@n1)*EdgeInverseLength')\n"
                  code += f"devsim.edge_model(device='{DEVICE_NAME}', region='{REGION_NAME}', name='vdiff', equation='Potential@n0 - Potential@n1')\n"
                  code += f"devsim.edge_model(device='{DEVICE_NAME}', region='{REGION_NAME}', name='vdiff_norm', equation='vdiff/Vt')\n"
                  code += f"devsim.edge_model(device='{DEVICE_NAME}', region='{REGION_NAME}', name='Bernoulli_n', equation='B(vdiff_norm)')\n"
                  code += f"devsim.edge_model(device='{DEVICE_NAME}', region='{REGION_NAME}', name='Bernoulli_p', equation='B(-vdiff_norm)')\n"
+                 
                  code += f"eq_Jn = 'ElectronCharge*mu_n*EdgeCouple*Vt*(Electrons@n1*Bernoulli_n - Electrons@n0*Bernoulli_p)'\n"
                  code += f"devsim.edge_model(device='{DEVICE_NAME}', region='{REGION_NAME}', name='ElectronCurrent', equation=eq_Jn)\n"
+
+                 # --- ADD THIS LINE ---
+                 # Explicitly create a new, simple model for the electron current
+                 code += f"devsim.edge_model(device='{DEVICE_NAME}', region='{REGION_NAME}', name='J_e', equation='ElectronCurrent')\n"
+                 
                  code += f"eq_Jp = '-ElectronCharge*mu_p*EdgeCouple*Vt*(Holes@n1*Bernoulli_p - Holes@n0*Bernoulli_n)'\n"
                  code += f"devsim.edge_model(device='{DEVICE_NAME}', region='{REGION_NAME}', name='HoleCurrent', equation=eq_Jp)\n"
+                 code += f"devsim.edge_model(device='{DEVICE_NAME}', region='{REGION_NAME}', name='NegHoleCurrent', equation='-HoleCurrent')\n"
+                 
                  code += f"srh_expr = 'ElectronCharge * (Electrons*Holes - n_i^2) / (taup*(Electrons + n_i) + taun*(Holes + n_i))'\n"
                  code += f"devsim.node_model(device='{DEVICE_NAME}', region='{REGION_NAME}', name='SRH_Recombination', equation=srh_expr)\n"
+
             elif item_name == "SETUP_EQUATIONS":
                  code += f"devsim.edge_model(device='{DEVICE_NAME}', region='{REGION_NAME}', name='PotentialEdgeFlux', equation='Permittivity*ElectricField')\n"
                  code += f"devsim.node_model(device='{DEVICE_NAME}', region='{REGION_NAME}', name='PotentialNodeCharge', equation='-ElectronCharge*(Holes - Electrons + NetDoping)')\n"
                  code += f"devsim.equation(device='{DEVICE_NAME}', region='{REGION_NAME}', name='PotentialEquation', variable_name='Potential', node_model='PotentialNodeCharge', edge_model='PotentialEdgeFlux', variable_update='default')\n"
-                 code += f"devsim.equation(device='{DEVICE_NAME}', region='{REGION_NAME}', name='ElectronContinuityEquation', variable_name='Electrons', node_model='SRH_Recombination', edge_model='ElectronCurrent', variable_update='positive')\n"
-                 code += f"devsim.equation(device='{DEVICE_NAME}', region='{REGION_NAME}', name='HoleContinuityEquation', variable_name='Holes', node_model='SRH_Recombination', edge_model='-HoleCurrent', variable_update='positive')\n"
+                 
+                 # --- MODIFY THIS LINE ---
+                 # Change edge_model='ElectronCurrent' to use our new simple model 'J_e'
+                 code += f"devsim.equation(device='{DEVICE_NAME}', region='{REGION_NAME}', name='ElectronContinuityEquation', variable_name='Electrons', node_model='SRH_Recombination', edge_model='J_e', variable_update='positive')\n"
+
+                 code += f"devsim.equation(device='{DEVICE_NAME}', region='{REGION_NAME}', name='HoleContinuityEquation', variable_name='Holes', node_model='SRH_Recombination', edge_model='NegHoleCurrent', variable_update='positive')\n"
+
             elif item_name == "SETUP_CONTACT_BC":
-                 code += f"devsim.set_parameter(device='{DEVICE_NAME}', name='Vanode_bias', value=0.0)\n"
-                 code += f"devsim.set_parameter(device='{DEVICE_NAME}', name='Vcathode_bias', value=0.0)\n"
+                 code += f"devsim.set_parameter(device='{DEVICE_NAME}', name='VAnode_bias', value=0.0)\n"
+                 code += f"devsim.set_parameter(device='{DEVICE_NAME}', name='VCathode_bias', value=0.0)\n"
+                 
                  code += f"for contact in ['{CONTACT_ANODE}', '{CONTACT_CATHODE}']:\n"
-                 code += f"    bias_name = f'{{contact}}_bias'\n"
+                 code += f"    bias_name = f'V{{contact}}_bias'\n"
                  code += f"    devsim.contact_node_model(device='{DEVICE_NAME}', contact=contact, name=f'{{contact}}_potential_bc', equation=f'Potential - {{bias_name}}')\n"
                  code += f"    devsim.contact_equation(device='{DEVICE_NAME}', contact=contact, name='PotentialEquation', node_model=f'{{contact}}_potential_bc')\n"
-                 # Simplified carrier BCs
-                 code += f"    devsim.contact_node_model(device='{DEVICE_NAME}', contact=contact, name='contact_electrons', equation='Electrons - ifelse(NetDoping > 0, NetDoping, n_i^2/abs(NetDoping+1e-30))')\n"
-                 code += f"    devsim.contact_node_model(device='{DEVICE_NAME}', contact=contact, name='contact_holes', equation='Holes - ifelse(NetDoping < 0, abs(NetDoping), n_i^2/(NetDoping+1e-30))')\n"
-                 code += f"    devsim.contact_equation(device='{DEVICE_NAME}', contact=contact, name='ElectronContinuityEquation', node_model='contact_electrons')\n"
-                 code += f"    devsim.contact_equation(device='{DEVICE_NAME}', contact=contact, name='HoleContinuityEquation', node_model='contact_holes')\n"
+
+                 # --- FIX: Make carrier boundary condition model names unique to each contact ---
+                 code += f"    devsim.contact_node_model(device='{DEVICE_NAME}', contact=contact, name=f'{{contact}}_contact_electrons', equation='Electrons - ifelse(NetDoping > 0, NetDoping, n_i^2/abs(NetDoping+1e-30))')\n"
+                 code += f"    devsim.contact_node_model(device='{DEVICE_NAME}', contact=contact, name=f'{{contact}}_contact_holes', equation='Holes - ifelse(NetDoping < 0, abs(NetDoping), n_i^2/(NetDoping+1e-30))')\n"
+                 code += f"    devsim.contact_equation(device='{DEVICE_NAME}', contact=contact, name='ElectronContinuityEquation', node_model=f'{{contact}}_contact_electrons')\n"
+                 code += f"    devsim.contact_equation(device='{DEVICE_NAME}', contact=contact, name='HoleContinuityEquation', node_model=f'{{contact}}_contact_holes')\n"
 
             else:
                  logger.warning(f"No code generation logic for step '{item_name}'")
@@ -252,20 +333,37 @@ class DiodeDesignEnv(gym.Env):
             logger.error(f"Error generating code string for step '{item_name}': {e}", exc_info=True)
             return None # Indicate failure
 
-
+    # In devsim_environment.py
     def _calculate_final_reward(self, metrics):
-        # ... (same as before) ...
-        if not metrics: return -100.0
-        if_val = metrics.get('if', 0); ir_val = abs(metrics.get('ir', 1e-3))
-        if_target = self.target_metrics['if_min']; ir_target = self.target_metrics['ir_max']
+        # If the simulation fails (e.g., non-convergence), return a massive penalty.
+        if not metrics:
+            return -100.0
+
+        # --- NEW: Add a large, constant bonus for successfully reaching the end state ---
+        # This makes the goal much more attractive than any intermediate rewards or penalties.
+        SUCCESS_BONUS = 50.0
+
+        # Existing reward logic based on performance
+        if_val = metrics.get('if', 0)
+        ir_val = abs(metrics.get('ir', 1e-3))
+        if_target = self.target_metrics['if_min']
+        ir_target = self.target_metrics['ir_max']
+
         ratio = (if_val / ir_val) if ir_val > 1e-18 else 1e18
-        reward = np.log10(max(1.0, ratio))
-        if if_val < if_target: reward -= 10 * (1 - if_val/(if_target + 1e-12))
-        if ir_val > ir_target: reward -= 10 * max(0, ir_val/ir_target - 1)
-        reward -= 0.05 * self._current_step
+        performance_reward = np.log10(max(1.0, ratio))
+
+        if if_val < if_target:
+            performance_reward -= 10 * (1 - if_val / (if_target + 1e-12))
+        if ir_val > ir_target:
+            performance_reward -= 10 * max(0, ir_val / ir_target - 1)
+
+        # Combine the success bonus with the performance reward
+        total_reward = SUCCESS_BONUS + performance_reward
+        
         logger.info(f"  Final Metrics: If={if_val:.2e}, Ir={ir_val:.2e}, Ratio={ratio:.2e}")
-        logger.info(f"  Reward calculated: {reward:.3f}")
-        return reward
+        logger.info(f"  Reward calculated (Bonus + Perf): {total_reward:.3f} = {SUCCESS_BONUS} + {performance_reward:.3f}")
+        
+        return total_reward
 
 
     def _execute_generated_script_and_get_reward(self):
@@ -327,14 +425,13 @@ class DiodeDesignEnv(gym.Env):
 
         except Exception as e:
             logger.error(f"FAILED to execute generated script: {e}", exc_info=True)
-            # print("--- Failing Script ---")
+            print("--- Failing Script ---")
             # print(full_script)
-            # print("--- End Failing Script ---")
+            print("--- End Failing Script ---")
             return -200.0 # Major penalty for script execution error
 
 
-# In devsim_environment.py
-
+    # In devsim_environment.py
     def step(self, action):
         self._current_step += 1
         action_item_index = int(action)
@@ -366,7 +463,8 @@ class DiodeDesignEnv(gym.Env):
 
         if action_item_name in self._completed_steps:
             logger.warning(f"Action '{action_item_name}' already completed. Applying penalty.")
-            reward = -2.0 # Increased penalty for repeating a step
+            reward = -5.0 # Increased penalty for repeating a step
+            terminated = True
             info["error"] = "Step already completed"
 
         elif action_item_name == "FINALIZE_SETUP_RUN_TEST":
@@ -387,6 +485,7 @@ class DiodeDesignEnv(gym.Env):
         else:
             # Check if dependencies for the action are met
             deps = required_deps.get(action_item_name, set())
+            print("Dependency for ", action_item_name, " is ", deps, ". Completed steps: ", self._completed_steps)
             if not deps.issubset(self._completed_steps):
                 # Large penalty for dependency failure
                 reward = -10.0
@@ -395,7 +494,12 @@ class DiodeDesignEnv(gym.Env):
             else:
                 # *** NEW: Positive reward for making correct progress! ***
                 # The reward is higher for more complex steps (more dependencies).
-                reward = 0.5 + (0.5 * len(deps))
+                if action_item_name == 'INIT_MESH':
+                    reward = 15.0
+                else:
+                    # Keep the scaled reward for other subsequent valid steps
+                    reward = 5
+
                 logger.info(f"Valid step. Assigning progress reward: {reward:.2f}")
 
                 # Generate code and update state
