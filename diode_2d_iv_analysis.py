@@ -57,7 +57,7 @@ def run_iv_simulation():
         v += 0.1
     
     # Try higher voltages
-    test_voltages = [0.6, 0.7, 0.8, 0.9, 1.0]
+    test_voltages = [0.6, 0.7, 0.8, 0.9, 1.0, 1.5, 2, 2.5, 3, 5]
     for val in test_voltages:
         try:
             set_parameter(device=device, name=GetContactBiasName("top"), value=val)

@@ -84,7 +84,7 @@ def main():
         
         # Test a few voltage points
         print("\nTesting voltage sweep...")
-        voltages = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
+        voltages = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.8, 1, 1.2, 1.5, 2]
         currents = []
         
         for v in voltages:

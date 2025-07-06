@@ -49,6 +49,9 @@ class SIMPOptimizer:
         # Prepare filter
         self.H, self.Hs = self._prepare_filter()
         
+        # Setup gradient operators for analytical sensitivities
+        self.Dx, self.Dy = self._setup_gradient_operators()
+        
         # History tracking
         self.compliance_history = []
         self.volume_history = []
@@ -85,6 +88,82 @@ class SIMPOptimizer:
         Hs = H.sum(axis=1).A1
         
         return H, Hs
+    
+    def _setup_gradient_operators(self):
+        """
+        Setup sparse matrices for fast voltage gradient computation
+        Returns Dx, Dy matrices such that:
+        Ex = (Dx @ V).reshape(nely, nelx)  # ∂V/∂x 
+        Ey = (Dy @ V).reshape(nely, nelx)  # ∂V/∂y
+        """
+        n_nodes = (self.nely + 1) * (self.nelx + 1)
+        n_elements = self.nely * self.nelx
+        
+        Dx = self._build_gradient_matrix_x(n_elements, n_nodes)
+        Dy = self._build_gradient_matrix_y(n_elements, n_nodes)
+        
+        return Dx, Dy
+    
+    def _build_gradient_matrix_x(self, n_elements, n_nodes):
+        """Build sparse matrix for ∂V/∂x computation"""
+        from scipy.sparse import coo_matrix
+        
+        row_indices = []
+        col_indices = []
+        values = []
+        
+        elem_idx = 0
+        for i in range(self.nely):
+            for j in range(self.nelx):
+                # Element nodes (counter-clockwise from bottom-left)
+                n1 = i * (self.nelx + 1) + j        # bottom-left
+                n2 = i * (self.nelx + 1) + (j + 1)  # bottom-right  
+                n3 = (i + 1) * (self.nelx + 1) + (j + 1)  # top-right
+                n4 = (i + 1) * (self.nelx + 1) + j  # top-left
+                
+                # ∂V/∂x using bilinear shape functions at element center
+                # dN/dx = [-1, 1, 1, -1] / (2*dx) for bilinear quad
+                coeff = 1.0 / (2.0 * self.dx)
+                
+                row_indices.extend([elem_idx] * 4)
+                col_indices.extend([n1, n2, n3, n4])
+                values.extend([-coeff, coeff, coeff, -coeff])
+                
+                elem_idx += 1
+        
+        return coo_matrix((values, (row_indices, col_indices)), 
+                          shape=(n_elements, n_nodes)).tocsr()
+    
+    def _build_gradient_matrix_y(self, n_elements, n_nodes):
+        """Build sparse matrix for ∂V/∂y computation"""
+        from scipy.sparse import coo_matrix
+        
+        row_indices = []
+        col_indices = []
+        values = []
+        
+        elem_idx = 0
+        for i in range(self.nely):
+            for j in range(self.nelx):
+                # Element nodes (counter-clockwise from bottom-left)
+                n1 = i * (self.nelx + 1) + j        # bottom-left
+                n2 = i * (self.nelx + 1) + (j + 1)  # bottom-right  
+                n3 = (i + 1) * (self.nelx + 1) + (j + 1)  # top-right
+                n4 = (i + 1) * (self.nelx + 1) + j  # top-left
+                
+                # ∂V/∂y using bilinear shape functions at element center
+                # dN/dy = [-1, -1, 1, 1] / (2*dy) for bilinear quad
+                coeff = 1.0 / (2.0 * self.dy)
+                
+                row_indices.extend([elem_idx] * 4)
+                col_indices.extend([n1, n2, n3, n4])
+                values.extend([-coeff, -coeff, coeff, coeff])
+                
+                elem_idx += 1
+        
+        return coo_matrix((values, (row_indices, col_indices)), 
+                          shape=(n_elements, n_nodes)).tocsr()
+    
     
     def _material_interpolation(self, x):
         """
@@ -140,11 +219,8 @@ class SIMPOptimizer:
                 else:
                     Ey = 0
                 
-                # Current density magnitude squared
-                J_squared = sigma[i, j] * (Ex**2 + Ey**2)
-                
-                # Power dissipation (compliance to minimize)
-                compliance += J_squared / (sigma[i, j] + 1e-12) * self.dx * self.dy
+                # Power dissipation: minimize ∫ σ|∇V|² dΩ (favors conductive paths)
+                compliance += sigma[i, j] * (Ex**2 + Ey**2) * self.dx * self.dy
         
         return compliance, V
     
@@ -178,6 +254,54 @@ class SIMPOptimizer:
                 dc[i, j] = (c_pert - c0) / delta
         
         return dc, c0
+    
+    def _analytical_sensitivity_analysis(self, x):
+        """
+        Compute analytical sensitivities
+        Much faster than finite differences: O(N) vs O(N²)
+        """
+        # Get baseline compliance and voltage solution
+        c0, V = self._simplified_electrical_analysis(x)
+        
+        # Material conductivity and its derivative
+        sigma = self._material_interpolation(x)
+        dE_drho = self.penal * (self.E1 - self.E0) * x**(self.penal - 1)
+        
+        # Use the SAME gradient calculation as electrical analysis (forward differences)
+        dc = np.zeros_like(x)
+        
+        for i in range(self.nely):
+            for j in range(self.nelx):
+                # Same gradient calculation as in _simplified_electrical_analysis
+                if j < self.nelx:
+                    Ex = -(V[i, min(j+1, self.nelx)] - V[i, j]) / self.dx
+                else:
+                    Ex = 0
+                    
+                if i < self.nely:
+                    Ey = -(V[min(i+1, self.nely), j] - V[i, j]) / self.dy
+                else:
+                    Ey = 0
+                
+                # Base power dissipation sensitivity
+                E_field_sq = Ex**2 + Ey**2
+                dc[i, j] = dE_drho[i, j] * E_field_sq * self.dx * self.dy
+        
+        return dc, c0
+    
+    def _compute_voltage_gradient_x(self, V):
+        """Fast computation of ∂V/∂x using pre-built sparse matrix"""
+        # V comes as (nely+1, nelx+1) array, need to flatten for matrix multiplication
+        V_flat = V.flatten()
+        Ex_flat = self.Dx @ V_flat
+        return Ex_flat.reshape(self.nely, self.nelx)
+    
+    def _compute_voltage_gradient_y(self, V):
+        """Fast computation of ∂V/∂y using pre-built sparse matrix"""
+        # V comes as (nely+1, nelx+1) array, need to flatten for matrix multiplication
+        V_flat = V.flatten()
+        Ey_flat = self.Dy @ V_flat
+        return Ey_flat.reshape(self.nely, self.nelx)
     
     def _optimality_criteria_update(self, x, dc):
         """
@@ -220,14 +344,20 @@ class SIMPOptimizer:
         
         return x_cnew
     
-    def optimize(self, max_iter=100, tol=1e-3):
+    def optimize(self, max_iter=100, tol=1e-3, use_analytical_sensitivities=True):
         """
         Run SIMP optimization
+        
+        Args:
+            max_iter: Maximum iterations
+            tol: Convergence tolerance  
+            use_analytical_sensitivities: Use fast analytical sensitivities (default True)
         """
         print(f"Starting SIMP Optimization")
         print(f"Design domain: {self.nelx} × {self.nely} elements")
         print(f"Volume fraction: {self.volfrac}")
         print(f"Penalty parameter: {self.penal}")
+        print(f"Sensitivity method: {'Analytical' if use_analytical_sensitivities else 'Finite Differences'}")
         print("=" * 50)
         
         x = self.x.copy()
@@ -235,8 +365,11 @@ class SIMPOptimizer:
         for iteration in range(max_iter):
             start_time = time.time()
             
-            # Sensitivity analysis
-            dc, compliance = self._sensitivity_analysis(x)
+            # Sensitivity analysis - choose method
+            if use_analytical_sensitivities:
+                dc, compliance = self._analytical_sensitivity_analysis(x)
+            else:
+                dc, compliance = self._sensitivity_analysis(x)
             
             # Save history
             self.compliance_history.append(compliance)
@@ -254,7 +387,6 @@ class SIMPOptimizer:
             
             iteration_time = time.time() - start_time
             
-            # Print progress
             print(f"Iter {iteration+1:3d}: Compliance = {compliance:.6e}, "
                   f"Volume = {np.sum(x)/(self.nelx*self.nely):.3f}, "
                   f"Change = {change:.6e}, Time = {iteration_time:.2f}s")

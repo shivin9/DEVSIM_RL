@@ -98,12 +98,21 @@ class SimpleMatrixToGMSH:
         return doping_function
     
     def generate_mesh(self, geo_file: str) -> str:
-        """Generate mesh from .geo file"""
+        """Generate mesh from .geo file with proper subprocess management"""
         msh_file = geo_file.replace('.geo', '.msh')
         
         try:
-            cmd = f"gmsh -2 {geo_file} -format msh2 -o {msh_file}"
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            # Use subprocess.run with explicit args instead of shell=True to prevent handle leaks
+            cmd_args = ["gmsh", "-2", geo_file, "-format", "msh2", "-o", msh_file]
+            
+            # Use proper subprocess management with timeouts and cleanup
+            result = subprocess.run(
+                cmd_args, 
+                capture_output=True, 
+                text=True, 
+                timeout=30,  # Prevent hanging processes
+                shell=False  # Avoid shell subprocess handle leaks
+            )
             
             if result.returncode == 0:
                 print(f"Mesh generated: {msh_file}")
@@ -111,8 +120,12 @@ class SimpleMatrixToGMSH:
             else:
                 print(f"GMSH error: {result.stderr}")
                 return None
+                
+        except subprocess.TimeoutExpired:
+            print(f"GMSH timeout for file {geo_file}")
+            return None
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"GMSH subprocess error: {e}")
             return None
     
     def visualize_matrix(self, material_matrix: np.ndarray, title: str = "Material Matrix"):
