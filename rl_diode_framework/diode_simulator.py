@@ -539,6 +539,14 @@ class DiodeSimulator:
             # Silent fail but log for debugging
             pass
         
+        # Terminate GMSH converter process to prevent file handle leaks
+        try:
+            if hasattr(self, 'converter') and hasattr(self.converter, 'cleanup'):
+                self.converter.cleanup()
+        except Exception as e:
+            # Fail silently if cleanup is not available or fails
+            pass
+
         # Force garbage collection to release file handles
         gc.collect()
         
